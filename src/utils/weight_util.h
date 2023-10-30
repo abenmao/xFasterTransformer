@@ -56,6 +56,8 @@ int readFile(const std::string &path, T *values, int size) {
     int nthreads = std::min(omp_get_max_threads(), 16);
     int chunk_size = (size + nthreads - 1) / nthreads;
 
+    int enable = (getenv("ENABLE_FAKE_MODEL") ? atoi(getenv("ENABLE_FAKE_MODEL")) : 0);
+    if (!enable)
     {
         std::ifstream file(path, std::ios::binary);
         if (!file) return 0;
@@ -75,6 +77,11 @@ int readFile(const std::string &path, T *values, int size) {
             file.close();
         }
     }
+    if (enable && count != size) {
+        printf("Loading Fake %s\n", path.c_str());
+        count = size;
+    }
+
     return count;
 }
 

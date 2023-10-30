@@ -274,7 +274,8 @@ public:
             resultBuffer1.Assign(inputBuffer.Data(), inputBuffer.Rows(), inputBuffer.Cols(), inputBuffer.Stride());
             inputBuffer.Assign(presult, rows, cols, stride);
         }
-        if (ctx->inputSeqLen > 256 && pastSeqLen == 0)
+        int enable = (getenv("ENABLE_FLASH_ATTN") ? atoi(getenv("ENABLE_FLASH_ATTN")) : 0);
+        if (enable && ctx->inputSeqLen > -1 && pastSeqLen == 0)
             flashAttention(ctx, qkvGroupMatMul, resultBuffer2, resultBuffer1, presentKey, presentValue, attnMask, pastSeqLen);
         else
             fusedAttention(ctx, query, key, value, resultBuffer1, presentKey, presentValue, attnMask, pastSeqLen);
@@ -523,7 +524,7 @@ protected:
     void flashAttention(DecoderContext *ctx, hpj::Matrix<float> &qkvMatMul, hpj::Matrix<float> &tmpRes,
             hpj::Matrix<float> &result, KVCacheTensor<KVCacheT> &presentKey, KVCacheTensor<KVCacheT> &presentValue,
             const float *attnMask, int pastSeqLen) {
-
+        printf("flash Attn.\n");
         // How many heads this task should do
         int batchSize = ctx->batchSize;
         int respQHeads = this->endQHead - this->startQHead;
