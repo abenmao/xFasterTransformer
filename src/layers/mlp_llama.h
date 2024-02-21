@@ -71,8 +71,8 @@ public:
         if (!enableCATMLP()) {
             gateWeight.Resize(hiddenSize, it.second - it.first);
             upWeight.Resize(hiddenSize, it.second - it.first);
-            ctx->mmHelper->packWeight(trans, quantizedGateWeight, gateWeight);
-            ctx->mmHelper->packWeight(trans, quantizedUpWeight, upWeight);
+            ctx->mmHelper->getBase()->packWeight(trans, quantizedGateWeight, gateWeight);
+            ctx->mmHelper->getBase()->packWeight(trans, quantizedUpWeight, upWeight);
         } else {
             hpj::Matrix<WeiT> quantizedCatWeights;
             catGateUpWeights(quantizedGateWeight, quantizedUpWeight, gateWeightScale, gateWeightZero, gateWeightSum,
@@ -86,7 +86,7 @@ public:
         // Horizontally split the down weight
         ctx->mmHelper->convertWeight(ctx, trans, imSize, hiddenSize, downW, downS, downZ, false, quantizedDownWeight,
                 downWeightScale, downWeightZero, downWeightSum);
-        ctx->mmHelper->packWeight(trans, quantizedDownWeight, downWeight);
+        ctx->mmHelper->packWeight(trans, quantizedDownWeight, downWeight, USE_MKL);
 
 #ifdef DEBUG
         dbg.debugPrint("quantizedGateWeight:\n");
@@ -217,11 +217,11 @@ private:
         ImT *C = output.Data();
 
         if (ctx->actType == DecoderContext::SILU) {
-            ctx->mmHelper->compute_silu(false, M, N, K, 1.0f, A, lda, B, scaleB, zeroB, sumB, 0.0f, C, ldc);
+            ctx->mmHelper->getBase()->compute_silu(false, M, N, K, 1.0f, A, lda, B, scaleB, zeroB, sumB, 0.0f, C, ldc);
         } else if (ctx->actType == DecoderContext::SWIGLU) { // chatglm2/3
-            ctx->mmHelper->compute_silu(false, M, N, K, 1.0f, A, lda, B, scaleB, zeroB, sumB, 0.0f, C, ldc);
+            ctx->mmHelper->getBase()->compute_silu(false, M, N, K, 1.0f, A, lda, B, scaleB, zeroB, sumB, 0.0f, C, ldc);
         } else if (ctx->actType == DecoderContext::GELU) { // gemma
-            ctx->mmHelper->compute_gelu(false, M, N, K, 1.0f, A, lda, B, scaleB, zeroB, sumB, 0.0f, C, ldc);
+            ctx->mmHelper->getBase()->compute_gelu(false, M, N, K, 1.0f, A, lda, B, scaleB, zeroB, sumB, 0.0f, C, ldc);
         } else {
             printf("ERROR: unsupported activation in MLP.\n");
             exit(-1);
@@ -245,7 +245,7 @@ private:
         const float *sumB = upWeightSum.Data();
         ImT *C = output.Data();
 
-        ctx->mmHelper->compute_resmul(false, M, N, K, 1.0f, A, lda, B, scaleB, zeroB, sumB, 0.0f, C, ldc, C, ldc);
+        ctx->mmHelper->getBase()->compute_resmul(false, M, N, K, 1.0f, A, lda, B, scaleB, zeroB, sumB, 0.0f, C, ldc, C, ldc);
     }
 
     void downProj(DecoderContext *ctx, hpj::Matrix<ImT> &input, hpj::Matrix<OutT> &output,
@@ -269,9 +269,9 @@ private:
 
         if (isMaster) {
             ctx->mmHelper->compute_residential(
-                    false, M, N, K, 1.0f, A, lda, B, scaleB, zeroB, sumB, 0.0f, C, ldc, NULL, R, ldr);
+                    false, M, N, K, 1.0f, A, lda, B, scaleB, zeroB, sumB, 0.0f, C, ldc, NULL, R, ldr, USE_MKL);
         } else {
-            ctx->mmHelper->compute(false, M, N, K, 1.0f, A, lda, B, scaleB, zeroB, sumB, 0.0f, C, ldc);
+            ctx->mmHelper->compute(false, M, N, K, 1.0f, A, lda, B, scaleB, zeroB, sumB, 0.0f, C, ldc, USE_MKL);
         }
     }
 
@@ -284,7 +284,7 @@ private:
         assert(catWeights.Cols() == output.Cols());
 
         int M = input.Rows(), N = output.Cols(), K = input.Cols();
-        int lda = input.Stride(), ldc = output.Stride();
+        int lda = input.Stride(), ldc = output.Stride(), ldd = siluBuf.Stride();
 
         const T1 *A = input.Data();
         const WeiT *B = catWeights.Data();
@@ -292,16 +292,12 @@ private:
         const float *zeroB = catWeightsZero.Data();
         const float *sumB = catWeightsSum.Data();
         T2 *C = output.Data();
+        T2 *Silu = siluBuf.Data();
 
-        ctx->mmHelper->compute(false, M, N, K, 1.0f, A, lda, B, scaleB, zeroB, sumB, 0.0f, C, ldc);
-
-        // Compute silu on the left half and then add it with the right half
-        if (ctx->actType == DecoderContext::SILU) {
-            DecoderUtil::siluSum(output, siluBuf);
-        } else if (ctx->actType == DecoderContext::SWIGLU) { // chatglm2/3
-            DecoderUtil::siluSum(output, siluBuf);
+        if (ctx->actType == DecoderContext::SILU || ctx->actType == DecoderContext::SWIGLU) { // chatglm2/3
+            ctx->mmHelper->compute_cat_silu(false, M, N, K, 1.0f, A, lda, B, scaleB, zeroB, sumB, 0.0f, C, ldc, Silu, ldd);
         } else if (ctx->actType == DecoderContext::GELU) { // gemma
-            DecoderUtil::geluSum(output, siluBuf);
+            ctx->mmHelper->compute_cat_gelu(false, M, N, K, 1.0f, A, lda, B, scaleB, zeroB, sumB, 0.0f, C, ldc, Silu, ldd);
         } else {
             printf("ERROR: unsupported activation in MLP.\n");
             exit(-1);

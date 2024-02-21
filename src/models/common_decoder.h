@@ -36,6 +36,8 @@
 #include "transpose_util.h"
 #include "weight_util.h"
 
+extern bool firstPhaseDone;
+
 using namespace xft;
 
 struct QKPO_Dummy {
@@ -226,7 +228,9 @@ public:
                 epsilon, vocabSize, embeddingSize, maxPositions, maxPosEmbed, maxSeqLength, useLogN, useNTK,
                 ropeParamsPtr);
 
-        ctx->ResetConfigReader(configPath);
+        //ctx->ResetConfigReader(configPath);
+        ctx->configReader = INIReader(configPath);
+        ctx->sectionName = *(ctx->configReader.Sections().begin());
 
         // Decoder
         if (layers % ctx->ppSize != 0) {
@@ -311,6 +315,7 @@ public:
 
             // Enlarge buffer if needed
             prepareBuffers(ctx, userSideBS, beamSize, logitsAll);
+	     firstPhaseDone = false;
         }
 
         AttnInT *embBuf = (AttnInT *)actBuffers->Data();
@@ -484,6 +489,8 @@ public:
         // free temporary new ids for prefix sharing
         if (step == 0 && this->prefixSharing) { free(ids); }
 
+	if (step == 0) { firstPhaseDone = true; }
+
         return std::tuple<float *, int, int>(
                 finalOut, this->predictor->getSplitOffset(), this->predictor->getSplitSize());
     }
@@ -639,9 +646,9 @@ protected:
                     ppRank, ropeParamsPtr, useLogN, useNTK));
 
             if (env.getEngineKind() == xft::DeviceKind::iGPU && env.getEngineIndex() < 0) // Sequential assignment
-                this->context->mmHelper = new MMHelper(env.getEngineKind(), ppRank * tpSize + tpRank);
+                this->context->mmHelper = new MKLMMHelper(new MMHelper(env.getEngineKind(), ppRank * tpSize + tpRank));
             else // assignment through the user
-                this->context->mmHelper = new MMHelper(env.getEngineKind(), env.getEngineIndex());
+                this->context->mmHelper = new MKLMMHelper(new MMHelper(env.getEngineKind(), env.getEngineIndex()));
         }
 
         return this->context.get();

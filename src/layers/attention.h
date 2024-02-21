@@ -25,6 +25,7 @@
 #include "gemm_kernel_ext.h"
 #include "kvcache_tensor.h"
 #include "matmul_helper.h"
+#include "mkl_matmul_helper.h"
 #include "simple_mem_pool.h"
 #include "transformer_ctx.h"
 #include "transformer_util.h"
@@ -166,7 +167,7 @@ public:
         ctx->mmHelper->convertWeight(trans, ctx->attHeadNum * ctx->attHeadSize, hiddenSize, attnOutWeight, attnOutScale,
                 attnOutZero, this->startQHead * headSize, qResponsibleCols, false, convertedWeight,
                 attnOutputWeightScale, attnOutputWeightZero, attnOutputWeightSum, true);
-        ctx->mmHelper->packWeight(trans, convertedWeight, attnOutputWeight);
+        ctx->mmHelper->packWeight(trans, convertedWeight, attnOutputWeight, USE_MKL);
 
 #ifdef DEBUG
         dbg.debugPrint(">>> attention output weight: [%d, %d] (%d)\n", convertedWeight.Rows(), convertedWeight.Cols(),
@@ -322,14 +323,18 @@ public:
 
         if (pastSeqLen == 0) {
             if (ctx->inputSeqLen > getFlashThresh()) {
-                flashAttention(ctx, query, key, value, attnSplit, presentKey, presentValue, attnMask, pastSeqLen);
+                flashSelfAttention(ctx, query, key, value, attnSplit, presentKey, presentValue, attnMask, pastSeqLen);
             } else if constexpr (std::is_same_v<InT, bfloat16_t> && std::is_same_v<OutT, bfloat16_t>) {
                 selfAttentionBF16(ctx, query, key, value, attnSplit, presentKey, presentValue);
             } else {
                 fusedAttention(ctx, query, key, value, attnSplit, presentKey, presentValue, attnMask, pastSeqLen);
             }
         } else {
-            fusedAttention(ctx, query, key, value, attnSplit, presentKey, presentValue, attnMask, pastSeqLen);
+            if (false && pastSeqLen > getFlashThresh()) {
+                flashCrossAttention(ctx, query, key, value, attnSplit, presentKey, presentValue, attnMask, pastSeqLen);
+            } else {
+                fusedAttention(ctx, query, key, value, attnSplit, presentKey, presentValue, attnMask, pastSeqLen);
+	    }
         }
         t4.release();
 
@@ -352,26 +357,26 @@ public:
                 ctx->mmHelper->compute_residential(false, attnSplit.Rows(), attnOutputWeight.Cols(), attnSplit.Cols(),
                         1.0f, attnSplit.Data(), attnSplit.Stride(), attnOutputWeight.Data(),
                         attnOutputWeightScale.Data(), attnOutputWeightZero.Data(), attnOutputWeightSum.Data(), 0.0f,
-                        outBuffer.Data(), outBuffer.Stride(), pbias, inputBuffer.Data(), inputBuffer.Stride());
+                        outBuffer.Data(), outBuffer.Stride(), pbias, inputBuffer.Data(), inputBuffer.Stride(), USE_MKL);
             } else {
                 float *pbias = attnOutputBias.Data();
                 if (attnOutputBias.Size() == 0) { pbias = nullptr; }
                 ctx->mmHelper->compute_resext(false, attnSplit.Rows(), attnOutputWeight.Cols(), attnSplit.Cols(), 1.0f,
                         attnSplit.Data(), attnSplit.Stride(), attnOutputWeight.Data(), attnOutputWeightScale.Data(),
                         attnOutputWeightZero.Data(), attnOutputWeightSum.Data(), 0.0f, outBuffer.Data(),
-                        outBuffer.Stride(), pbias, gamma, inputBuffer.Data(), inputBuffer.Stride());
+                        outBuffer.Stride(), pbias, gamma, inputBuffer.Data(), inputBuffer.Stride(), USE_MKL);
             }
         } else {
             if (attnOutputBias.Size() == 0) {
                 ctx->mmHelper->compute(false, attnSplit.Rows(), attnOutputWeight.Cols(), attnSplit.Cols(), 1.0f,
                         attnSplit.Data(), attnSplit.Stride(), attnOutputWeight.Data(), attnOutputWeightScale.Data(),
                         attnOutputWeightZero.Data(), attnOutputWeightSum.Data(), 0.0f, outBuffer.Data(),
-                        outBuffer.Stride());
+                        outBuffer.Stride(), USE_MKL);
             } else {
                 ctx->mmHelper->compute_bias(false, attnSplit.Rows(), attnOutputWeight.Cols(), attnSplit.Cols(), 1.0f,
                         attnSplit.Data(), attnSplit.Stride(), attnOutputWeight.Data(), attnOutputWeightScale.Data(),
                         attnOutputWeightZero.Data(), attnOutputWeightSum.Data(), 0.0f, outBuffer.Data(),
-                        outBuffer.Stride(), attnOutputBias.Data());
+                        outBuffer.Stride(), attnOutputBias.Data(), USE_MKL);
             }
         }
         t5.release();
@@ -398,6 +403,7 @@ protected:
     void selfAttentionBF16(DecoderContext *ctx, hpj::Matrix<bfloat16_t> &query, hpj::Matrix<bfloat16_t> &key,
             hpj::Matrix<bfloat16_t> &value, hpj::Matrix<bfloat16_t> &result, KVCacheTensor<KVCacheT> &presentKey,
             KVCacheTensor<KVCacheT> &presentValue) {
+        Timer tmc(PINFO, "selfAttnBF16 Attn");
         int responsibleQHeads = this->endQHead - this->startQHead;
         int responsibleKVHeads = this->endKVHead - this->startKVHead;
 
@@ -530,6 +536,7 @@ protected:
     void fusedAttention(DecoderContext *ctx, hpj::Matrix<ImT> &query, hpj::Matrix<ImT> &key, hpj::Matrix<ImT> &value,
             hpj::Matrix<ImT> &result, KVCacheTensor<KVCacheT> &presentKey, KVCacheTensor<KVCacheT> &presentValue,
             const float *attnMask, int pastSeqLen) {
+        Timer tmc(PINFO, "fused Attn");
         // How many heads this task should do
         int responsibleHeads = this->endQHead - this->startQHead;
         int batchSize = ctx->batchSize;
@@ -564,9 +571,11 @@ protected:
         }
 
         if (!shardHead) {
+            Timer tmc(PINFO, "slim Attn");
             return slimAttention(ctx, query, key, value, result, presentKey, presentValue, attnMask, pastSeqLen,
                     mBlockSize, kvCopied);
         } else { // Seperate impl. when head is sharded
+            Timer tmc(PINFO, "cross Attn");
             return crossAttnShardHead(ctx, query, key, value, result, presentKey, presentValue, attnMask, pastSeqLen);
         }
     }
@@ -682,9 +691,10 @@ protected:
     }
 
     template <typename KVCacheT>
-    void flashAttention(DecoderContext *ctx, hpj::Matrix<ImT> &query, hpj::Matrix<ImT> &key, hpj::Matrix<ImT> &value,
+    void flashSelfAttention(DecoderContext *ctx, hpj::Matrix<ImT> &query, hpj::Matrix<ImT> &key, hpj::Matrix<ImT> &value,
             hpj::Matrix<ImT> &result, KVCacheTensor<KVCacheT> &presentKey, KVCacheTensor<KVCacheT> &presentValue,
             const float *attnMask, int pastSeqLen) {
+        Timer tmc(PINFO, "flash Attn");
 #if defined(AVX512_BF16_WEIGHT_ONLY_BF16)
         using AttnT = bfloat16_t;
 #else
@@ -707,10 +717,10 @@ protected:
         int kvStride;
         // convert to AttnT forcely for accelerating purpose
         if constexpr (!std::is_same_v<AttnT, ImT>) {
-            //Timer tmc(true, "convert KV matrix into bf16");
+            //Timer tmc(PINFO, "convert KV matrix into bf16");
             kvStride = kvCols * 2;
             AttnT *kvBuf = (AttnT *)SimpleMemPool::instance().getBuffer(
-                    "flashKVBuf", batchSize * srcLen * kvStride * sizeof(AttnT));
+                    "flashKVBuf", sizeof(AttnT) * batchSize * srcLen * kvStride);
 #pragma omp parallel for collapse(3)
             for (uint64_t b = 0; b < batchSize; ++b)
                 for (uint64_t seq = 0; seq < srcLen; ++seq)
@@ -741,7 +751,58 @@ protected:
 
         // copy current key/values to cache
         copyKVCache(ctx, key, value, presentKey, presentValue, pastSeqLen);
+
+/*
+#pragma omp parallel for collapse(3)
+        for (uint64_t b = 0; b < batchSize; ++b) {
+            for (uint64_t i = 0; i < (this->endKVHead - this->startKVHead); ++i) {
+                // Copy current key/value to cached keys/values
+                // Re-layout is needed: (bs, seq=1, hidden_size) -> (seq=1, bs, hidden_size)
+                // Be noted: for group attention, the key/value is less than query
+                for (uint64_t seq = 0; seq < tgtLen; ++seq) {
+                    auto srcK = key.Data() + b * tgtLen * qkvCols + seq * qkvCols + i * headSize;
+                    auto dstK = presentKey.getSequence(pastSeqLen + seq, b, i);
+
+                    auto srcV = value.Data() + b * tgtLen * qkvCols + seq * qkvCols + i * headSize;
+                    auto dstV = presentValue.getSequence(pastSeqLen + seq, b, i);
+
+                    xft::copy(dstK, srcK, headSize);
+                    xft::copy(dstV, srcV, headSize);
+                }
+            }
+        }
+*/
     }
+
+    template <typename KVCacheT>
+    void flashCrossAttention(DecoderContext *ctx, hpj::Matrix<ImT> &query, hpj::Matrix<ImT> &key,
+            hpj::Matrix<ImT> &value, hpj::Matrix<ImT> &result, KVCacheTensor<KVCacheT> &presentKey,
+            KVCacheTensor<KVCacheT> &presentValue, const float *attnMask, int pastSeqLen) {
+#if defined(AVX512_BF16_WEIGHT_ONLY_BF16)
+        using AttnT = bfloat16_t;
+#else
+        using AttnT = float;
+#endif
+        // How many heads this task should do
+        int batchSize = ctx->batchSize;
+        int respQHeads = this->endQHead - this->startQHead;
+        int respKVHeads = this->endKVHead - this->startKVHead;
+        int headSize = ctx->attHeadSize;
+        int qCols = respQHeads * headSize;
+        int kvCols = respKVHeads * headSize;
+        int qkvCols = qCols + kvCols * 2;
+        float scale = ctx->attFactor;
+        int srcLen = ctx->inputSeqLen;
+        int tgtLen = pastSeqLen + srcLen;
+
+        // copy current key/values to cache
+        copyKVCache(ctx, key, value, presentKey, presentValue, pastSeqLen);
+
+        // [batch, src, head, headsize]
+        scaledDpAttention<AttnT, KVCacheT>(query, presentKey, presentValue, attnMask, scale, batchSize, srcLen, tgtLen, respQHeads, respKVHeads,
+                headSize, result);
+    }
+
 
     // scaled dot-product attention: bmm1 + softmax + bmm2
     template <typename AttnT>
@@ -832,6 +893,106 @@ protected:
                         DecoderUtil::incrementalTileAttention(q, kBlk, vBlk, attnMsk + b, qRealBlk, headSize, kvRealBlk,
                                 tgtLen, preSum[tid], sum[tid], preMax[tid], max[tid], refac, qkArr[tid], expQkvArr[tid],
                                 out, headSize, kvStride, kvStride, stride);
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    template <typename AttnT, typename KVCacheT>
+    void scaledDpAttention(const hpj::Matrix<ImT> &query, KVCacheTensor<KVCacheT> &key, KVCacheTensor<KVCacheT> &value,
+	    const float *attnMask, float scale, int batchSize, int srcLen, int tgtLen, int numQHead, int numKVHead,
+            int headSize, hpj::Matrix<ImT> &result) {
+	int qStride = query.Stride();
+	int stride = result.Stride();
+	ImT *output = result.Data();
+        // output = trans(softmax(query * trans(key)) * value)
+        int nth = omp_get_max_threads();
+        // closest value of power of 2
+        int minBlk = srcLen;
+        // Split sequence to make sure a moderate sync frequency and the intermediate
+        // result [srcSeq * tgtSeq] in cache. The current block size is derived from practical experience.
+        int srcBlk = std::min(256, minBlk);
+        int tgtBlk = std::min(1024, tgtLen);
+        float refac = scale;
+        int numGroup = numQHead / numKVHead;
+
+        int numArr = 7;
+        int arrStride = (4 + tgtBlk + 2 * headSize) * srcBlk;
+        float *thrBuf = (float *)SimpleMemPool::instance().getBuffer("threadBuffers", sizeof(float) * nth * arrStride);
+        float **thrPtrBuf
+                = (float **)SimpleMemPool::instance().getBuffer("threadPtrBuffers", sizeof(float *) * nth * numArr);
+
+        float **preSum = thrPtrBuf;
+        float **sum = thrPtrBuf + nth;
+        float **preMax = thrPtrBuf + nth * 2;
+        float **max = thrPtrBuf + nth * 3;
+        float **qkArr = thrPtrBuf + nth * 4;
+        float **expQkvArr = thrPtrBuf + nth * 5;
+        float **qArr = thrPtrBuf + nth * 6;
+
+        for (int i = 0; i < nth; ++i) {
+            preSum[i] = thrBuf + srcBlk * i;
+            sum[i] = thrBuf + srcBlk * nth + srcBlk * i;
+            preMax[i] = thrBuf + srcBlk * nth * 2 + srcBlk * i;
+            max[i] = thrBuf + srcBlk * nth * 3 + srcBlk * i;
+            qkArr[i] = thrBuf + srcBlk * nth * 4 + srcBlk * tgtBlk * i;
+            expQkvArr[i] = thrBuf + srcBlk * nth * (4 + tgtBlk) + srcBlk * headSize * i;
+            qArr[i] = thrBuf + srcBlk * nth * (4 + tgtBlk + headSize) + srcBlk * headSize * i;
+        }
+
+	printf("before three loops %d %d(%d) %d(%d)\n", numGroup, srcBlk, srcLen, tgtBlk, tgtLen);
+#pragma omp parallel for collapse(3) schedule(dynamic)
+        for (uint64_t i = 0; i < batchSize; ++i) {
+            for (int j = 0; j < numQHead; ++j) {
+                for (int m = 0; m < srcLen; m += srcBlk) {
+                    int tid = omp_get_thread_num();
+
+                    int qRealBlk = std::min(srcBlk, srcLen - m);
+                    uint64_t srcOff = i * srcLen * qStride + j * headSize;
+                    uint64_t outOff = i * srcLen * stride + j * headSize;
+                    const ImT *qbuf = query.Data() + srcOff + m * qStride;
+                    AttnT *q = (AttnT *)qArr[tid];
+                    ImT *out = output + outOff + m * stride;
+
+                    // reset out
+                    for (int ii = 0; ii < qRealBlk; ++ii) {
+#pragma omp simd
+                        for (int jj = 0; jj < headSize; ++jj) {
+                            out[ii * stride + jj] = 0; // reset output
+                            q[ii * headSize + jj] = (AttnT)(qbuf[ii * qStride + jj]); // reset output
+                        }
+                    }
+                    // reset sum
+#pragma omp simd
+                    for (int ii = 0; ii < qRealBlk; ++ii) {
+                        preSum[tid][ii] = 0;
+                        sum[tid][ii] = 0;
+                        preMax[tid][ii] = std::numeric_limits<float>::lowest();
+                        max[tid][ii] = std::numeric_limits<float>::lowest();
+                    }
+
+                    auto keyMatInfo = key.getHead(i, j / numGroup);
+                    auto valueMatInfo = value.getHead(i, j / numGroup);
+                    const float *attnMsk = getMask(attnMask, i, j, srcLen, tgtLen) + m * tgtLen;
+                    const AttnT *k = (AttnT *)std::get<0>(keyMatInfo);
+                    const AttnT *v = (AttnT *)std::get<0>(valueMatInfo);
+                    // split the target len dimension
+                    for (int b = 0; b < tgtLen; b += tgtBlk) {
+                        int kvRealBlk = std::min(tgtBlk, tgtLen - b);
+                        // TODO: mask out
+                        if (enableSkipMsk() && DecoderUtil::skipMskAttn(attnMsk + b, qRealBlk, kvRealBlk, tgtLen)) {
+                            // printf("Skip bs %d head %d src %d tgt %d\n", i, j, m, b);
+                            break;
+                        }
+
+                        const AttnT *kBlk = k + b * std::get<1>(keyMatInfo);
+                        const AttnT *vBlk = v + b * std::get<1>(valueMatInfo);
+
+                        DecoderUtil::incrementalTileAttention(q, kBlk, vBlk, attnMsk + b, qRealBlk, headSize, kvRealBlk,
+                                tgtLen, preSum[tid], sum[tid], preMax[tid], max[tid], refac, qkArr[tid], expQkvArr[tid],
+                                out, headSize, std::get<1>(keyMatInfo), std::get<1>(valueMatInfo), stride);
                     }
                 }
             }

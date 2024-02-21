@@ -23,10 +23,13 @@
 #include "float16.h"
 #include "intrinsics_util.h"
 #include "matmul_helper.h"
+#include "mkl_matmul_helper.h"
 #include "my_types.h"
 #include "timeline.h"
 #include "transformer_ctx.h"
 #include "xdnn.h"
+
+#define USE_MKL true //false
 
 extern int getFlashThresh();
 extern bool enableCATMLP();

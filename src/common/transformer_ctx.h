@@ -54,6 +54,7 @@ public:
 };
 
 class MMHelper;
+class MKLMMHelper;
 
 struct DecoderContext {
 
@@ -110,7 +111,7 @@ struct DecoderContext {
     hpj::Matrix<float> qkvMatMul; // query, key, value
     hpj::Matrix<float> imOut; // intermediate output
 
-    MMHelper *mmHelper;
+    MKLMMHelper *mmHelper;
 
     std::string configPath;
     INIReader configReader;

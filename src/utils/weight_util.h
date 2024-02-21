@@ -157,6 +157,8 @@ int loadWeight(std::string filename, T *&ptr, int size, DataType w_type = DataTy
 
     // By default, read the config.ini configuration file
     // in the same directory as the model file to determine the data type of the file.
+    // TODO: remove, just for testing
+    w_type = DataType::fp16;
     if (w_type == DataType::unknown) {
         std::size_t pos = filename.find_last_of("/\\");
         std::string dirPath = filename.substr(0, pos);

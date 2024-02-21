@@ -20,6 +20,8 @@
 #include "transformer_ctx.h"
 #include <type_traits>
 
+extern bool firstPhaseDone;
+
 template <template <typename, typename> class Model, typename FirstTokenDtype, typename NextTokenDtype,
         typename KVCacheDtype>
 class HybridModel : public AbstractDecoder {
@@ -28,7 +30,9 @@ public:
         // The weight location configured in "FIRST_TOKEN_WEIGHT_LOCATION" and "NEXT_TOKEN_WEIGHT_LOCATION"
         int firstNode = getenv("FIRST_TOKEN_WEIGHT_LOCATION") ? atoi(getenv("FIRST_TOKEN_WEIGHT_LOCATION")) : -1;
         xft_set_preferred_node(firstNode);
+        firstPhaseDone = false;
         firstModel = new Model<FirstTokenDtype, KVCacheDtype>(modelPath);
+        firstPhaseDone = true;
 
         int nextNode = getenv("NEXT_TOKEN_WEIGHT_LOCATION") ? atoi(getenv("NEXT_TOKEN_WEIGHT_LOCATION")) : -1;
         xft_set_preferred_node(nextNode);
@@ -52,7 +56,10 @@ public:
             promptIds.resize(dims[0] * dims[2]);
             std::copy(ids, ids + dims[0] * dims[2], promptIds.begin());
 
-            return firstModel->forward(ids, dims, step, logitsAll);
+            firstPhaseDone = false;
+            auto ret = firstModel->forward(ids, dims, step, logitsAll);
+            firstPhaseDone = true;
+            return ret;
         } else {
             // Make everything ready as step==0 is skipped in nextModel
             if (step == 1) {

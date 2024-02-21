@@ -54,6 +54,15 @@ public:
     template class CLASS<T, CacheT>;                         \
     static DecoderRegister decoder_##CLASS##_##T##_##CacheT( \
             #NAME "-" #T "-" #CacheT, [](const std::string &modelPath) { return new CLASS<T, CacheT>(modelPath); });
+//            #NAME "-" #T "-" #CacheT, [](const std::string &modelPath) { \
+//		if (std::is_same_v<T, bfloat16_t> && !sharedModel()) { \
+//			return new HybridModel<CLASS, T, T, CacheT>(modelPath); \
+//		} else { \
+//			return new CLASS<T, CacheT>(modelPath); \
+//		} \
+//	});
+
+//            #NAME "-" #T "-" #CacheT, [](const std::string &modelPath) { return new CLASS<T, CacheT>(modelPath); });
 
 #define REGISTER_HYBRID_MODEL(CLASS, NAME, T1, T2, CacheT)                                                 \
     template class HybridModel<CLASS, T1, T2, CacheT>;                                                     \

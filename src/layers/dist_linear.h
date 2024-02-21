@@ -64,9 +64,9 @@ public:
         zeroWeight.Resize(N);
 
         hpj::Matrix<WeiT> quantizedWeight;
-        ctx->mmHelper->convertWeight(
+        ctx->mmHelper->getBase()->convertWeight(
                 true, K, N, w + splitOffset * K, nullptr, nullptr, quantizedWeight, scaleWeight, zeroWeight, sumWeight);
-        ctx->mmHelper->packWeight(true, quantizedWeight, weight);
+        ctx->mmHelper->getBase()->packWeight(true, quantizedWeight, weight);
 
         // Copy Bias
         if (b) {
@@ -79,12 +79,13 @@ public:
     template <typename T1, typename T2>
     void forward(DecoderContext *ctx, const T1 *input, T2 *output, int batchSize) {
         TimeLine t("DistLinear.forward");
+	Timer tmc(true, "dist compute bias or not");
         if (bias) {
-            ctx->mmHelper->compute_bias(false, batchSize, splitSize, inputSize, 1.0f, input, inputSize, weight.Data(),
+            ctx->mmHelper->getBase()->compute_bias(false, batchSize, splitSize, inputSize, 1.0f, input, inputSize, weight.Data(),
                     scaleWeight.Data(), zeroWeight.Data(), sumWeight.Data(), 0.0f, output, splitSize, bias);
 
         } else {
-            ctx->mmHelper->compute(false, batchSize, splitSize, inputSize, 1.0f, input, inputSize, weight.Data(),
+            ctx->mmHelper->getBase()->compute(false, batchSize, splitSize, inputSize, 1.0f, input, inputSize, weight.Data(),
                     scaleWeight.Data(), zeroWeight.Data(), sumWeight.Data(), 0.0f, output, splitSize);
         }
     }

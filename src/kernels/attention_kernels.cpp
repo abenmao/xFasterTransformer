@@ -41,7 +41,7 @@ void crossAttention(bfloat16_t *output, bfloat16_t *query, bfloat16_t *key, bflo
     }
 
     int thrScoreSize = (maxCtxSize + 15) / 16 * 16;
-    float *scores = (float *)SimpleMemPool::instance().getBuffer("qkscore", threadNum * thrScoreSize * sizeof(float));
+    float *scores = (float *)SimpleMemPool::instance().getBuffer("qkscore", sizeof(float) * threadNum * thrScoreSize);
 
 #pragma omp parallel for collapse(2)
     for (int b = 0; b < batchSize; ++b) {

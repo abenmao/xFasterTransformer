@@ -77,7 +77,7 @@ void selfAttention_SeparateCopy(bfloat16_t *output, bfloat16_t *query, bfloat16_
             = fusedPack ? threadNum * (kPackSize + vPackSize) : (batchSize * kvHeadNum) * (kPackSize + vPackSize);
 
     bfloat16_t *packBuf
-            = (bfloat16_t *)SimpleMemPool::instance().getBuffer("kv_packing", totalPackSize * sizeof(bfloat16_t));
+            = (bfloat16_t *)SimpleMemPool::instance().getBuffer("kv_packing", sizeof(bfloat16_t) * totalPackSize);
 
     // Copy key/value to cache and pack them
     // If packing is not fused into computing, then pack it here
@@ -132,7 +132,7 @@ void selfAttention_SeparateCopy(bfloat16_t *output, bfloat16_t *query, bfloat16_
     // Prepare score buffer
     auto maxScoreStride = (maxTokenSize + 31) / 32 * 32;
     bfloat16_t *scores = (bfloat16_t *)SimpleMemPool::instance().getBuffer(
-            "qkscore", threadNum * mBlockSize * maxScoreStride * sizeof(bfloat16_t));
+            "qkscore", sizeof(bfloat16_t) * threadNum * mBlockSize * maxScoreStride);
 
     auto totalBlocks = blkEndIndex[batchSize - 1];
     std::pair<int, int> packInfo[threadNum];
@@ -276,10 +276,10 @@ void selfAttention_FusedCopy(bfloat16_t *output, bfloat16_t *query, bfloat16_t *
     const int kPackSize = xdnn_small_amx_sgemm_bf16bf16bf16_packb_size(maxTokenSize, headSize, 32, 32);
     const int vPackSize = xdnn_small_amx_sgemm_bf16bf16bf16_packb_size(headSize, maxTokenSize, 32, 32);
     bfloat16_t *packBuf = (bfloat16_t *)SimpleMemPool::instance().getBuffer(
-            "kv_packing", threadNum * (kPackSize + vPackSize) * sizeof(bfloat16_t));
+            "kv_packing", sizeof(bfloat16_t) * threadNum * (kPackSize + vPackSize));
     int maxScoreStride = (maxTokenSize + 31) / 32 * 32;
     bfloat16_t *scores = (bfloat16_t *)SimpleMemPool::instance().getBuffer(
-            "qkscore", threadNum * mBlockSize * maxScoreStride * sizeof(bfloat16_t));
+            "qkscore", sizeof(bfloat16_t) * threadNum * mBlockSize * maxScoreStride);
 
 #ifdef DEBUG
     printf("maxTokenSize=%d, tokenSizes[0]=%d, offsets[0]=%d, kvStride=%d\n", maxTokenSize, tokenSizes[0], offsets[0],

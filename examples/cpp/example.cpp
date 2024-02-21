@@ -460,6 +460,7 @@ int main(int argc, char **argv) {
 
         Timer timerSecond;
         if (!model.isDone()) {
+            Timer t(isMaster, "[INFO] Second token");
             secondIds = model.generate();
             secondIdCount++;
         }

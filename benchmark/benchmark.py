@@ -149,14 +149,15 @@ if __name__ == "__main__":
     )
 
     try:
-        import xfastertransformer
-
-        print("[INFO] xfastertransformer is installed, using pip installed package.")
-    except Exception as e:
-        sys.path.append("../src")
+        sys.path.insert(0, "../src")
         import xfastertransformer
 
         print("[INFO] xfastertransformer is not installed in pip, using source code.")
+
+    except Exception as e:
+        import xfastertransformer
+
+        print("[INFO] xfastertransformer is installed, using pip installed package.")
 
     model = xfastertransformer.AutoModel.from_pretrained(args.model_path, dtype=args.dtype)
     input_prompts = []
