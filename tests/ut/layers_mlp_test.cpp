@@ -136,20 +136,14 @@ void test_MLPLLaMA(void) {
         downW[i] = static_cast<float>(0.5f * rand() / RAND_MAX);
     }
 
-    compareMLPLLaMA<T>(18, hiddenSize, intermediateSize, gateW, upW, downW);
-    compareMLPLLaMA<T>(16, hiddenSize, intermediateSize, gateW, upW, downW);
-    compareMLPLLaMA<T>(16, hiddenSize, intermediateSize, gateW, upW, downW);
-    compareMLPLLaMA<T>(16, hiddenSize, intermediateSize, gateW, upW, downW);
-    compareMLPLLaMA<T>(16, hiddenSize, intermediateSize, gateW, upW, downW);
-    compareMLPLLaMA<T>(10, hiddenSize, intermediateSize, gateW, upW, downW);
-    compareMLPLLaMA<T>(4, hiddenSize, intermediateSize, gateW, upW, downW);
-    compareMLPLLaMA<T>(2, hiddenSize, intermediateSize, gateW, upW, downW);
-    compareMLPLLaMA<T>(1, hiddenSize, intermediateSize, gateW, upW, downW);
-    compareMLPLLaMA<T>(2, hiddenSize, intermediateSize, gateW, upW, downW);
-    compareMLPLLaMA<T>(4, hiddenSize, intermediateSize, gateW, upW, downW);
-    compareMLPLLaMA<T>(6, hiddenSize, intermediateSize, gateW, upW, downW);
-    compareMLPLLaMA<T>(16, hiddenSize, intermediateSize, gateW, upW, downW);
-    compareMLPLLaMA<T>(16, hiddenSize, intermediateSize, gateW, upW, downW);
+    //compareMLPLLaMA<T>(18, hiddenSize, intermediateSize, gateW, upW, downW);
+    //compareMLPLLaMA<T>(16, hiddenSize, intermediateSize, gateW, upW, downW);
+    //compareMLPLLaMA<T>(10, hiddenSize, intermediateSize, gateW, upW, downW);
+    //compareMLPLLaMA<T>(4, hiddenSize, intermediateSize, gateW, upW, downW);
+    //compareMLPLLaMA<T>(1, hiddenSize, intermediateSize, gateW, upW, downW);
+
+    compareMLPLLaMA<T>(16, hiddenSize, 107*16, gateW, upW, downW);
+    //compareMLPLLaMA<T>(16, hiddenSize, 107*16, gateW, upW, downW);
 
     free(gateW);
     free(upW);

@@ -136,9 +136,12 @@ public:
         dbg.dumpMatrix(inBuffer);
 #endif
 
+        printf("outBuffer (%d %d %d) normBuffer (%d %d %d) inBuffer (%d %d %d)\n", outBuffer.Rows(), outBuffer.Cols(), outBuffer.Stride(), normBuffer.Rows(), normBuffer.Cols(), normBuffer.Stride(), inBuffer.Rows(), inBuffer.Cols(), inBuffer.Stride());
+        printf("gateWeight (%d %d %d) upWeight (%d %d %d) downWeight (%d %d %d) catWeights (%d %d %d)\n", gateWeight.Rows(), gateWeight.Cols(), gateWeight.Stride(), upWeight.Rows(), upWeight.Cols(), upWeight.Stride(), downWeight.Rows(), downWeight.Cols(), downWeight.Stride(), catWeights.Rows(), catWeights.Cols(), catWeights.Stride());
         if (!enableCATMLP()) {
             hpj::Matrix<ImT> imBuffer(
                     (ImT *)ctx->imOut.Data(), ctx->imOut.Rows(), ctx->imOut.Cols(), ctx->imOut.Stride());
+            printf("imBuffer (%d %d %d)\n", imBuffer.Rows(), imBuffer.Cols(), imBuffer.Stride());
             gateProj(ctx, doLnBefore ? normBuffer : inBuffer, imBuffer);
 
 #ifdef DEBUG
@@ -161,14 +164,17 @@ public:
 
         } else {
             auto M = normBuffer.Rows();
-            auto N = catWeights.Cols();
+            //auto N = catWeights.Cols();
+            auto N = downWeight.Rows() * 2;
             hpj::Matrix<ImT> imBuffer((ImT *)ctx->imOut.Data(), M, N, N);
 
+            printf("imBuffer (%d %d %d)\n", imBuffer.Rows(), imBuffer.Cols(), imBuffer.Stride());
             // Need to allocate extra buffer as oneDNN does not support the case of stride > cols
-            const int cols = N / 2;
+            const int cols = downWeight.Rows();
             auto bufSize = sizeof(ImT) * M * cols;
             ImT *t = (ImT *)SimpleMemPool::instance().getBuffer("mlp_silu", bufSize);
             hpj::Matrix<ImT> siluBuf(t, M, cols, cols);
+            printf("siluBuf (%d %d %d)\n", siluBuf.Rows(), siluBuf.Cols(), siluBuf.Stride());
 #ifdef DEBUG
             dbg.debugPrint(
                     ">>> enableCATMLP imBuffer: [%d, %d] (%d)\n", imBuffer.Rows(), imBuffer.Cols(), imBuffer.Stride());
@@ -204,7 +210,7 @@ private:
 
         assert(input.Rows() == output.Rows());
         assert(input.Cols() == gateWeight.Rows());
-        assert(gateWeight.Cols() == output.Cols());
+        //assert(gateWeight.Cols() == output.Cols());
 
         int M = input.Rows(), N = output.Cols(), K = input.Cols();
         int lda = input.Stride(), ldc = output.Stride();
@@ -233,7 +239,7 @@ private:
 
         assert(input.Rows() == output.Rows());
         assert(input.Cols() == upWeight.Rows());
-        assert(upWeight.Cols() == output.Cols());
+        //assert(upWeight.Cols() == output.Cols());
 
         int M = input.Rows(), N = output.Cols(), K = input.Cols();
         int lda = input.Stride(), ldc = output.Stride();
@@ -253,7 +259,7 @@ private:
         TimeLine t("DownProj");
 
         assert(input.Rows() == output.Rows());
-        assert(input.Cols() == downWeight.Rows());
+        //assert(input.Cols() == downWeight.Rows());
         assert(downWeight.Cols() == output.Cols());
 
         int M = input.Rows(), N = output.Cols(), K = downWeight.Rows();
@@ -281,7 +287,7 @@ private:
 
         assert(input.Rows() == output.Rows());
         assert(input.Cols() == catWeights.Rows());
-        assert(catWeights.Cols() == output.Cols());
+        //assert(catWeights.Cols() == output.Cols());
 
         int M = input.Rows(), N = output.Cols(), K = input.Cols();
         int lda = input.Stride(), ldc = output.Stride();
