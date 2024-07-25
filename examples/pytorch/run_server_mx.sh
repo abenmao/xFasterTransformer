@@ -1,0 +1,13 @@
+python server_mx.py \
+--token_path=/home/mengchen/xFasterTransformer/examples/model_config/chatglm3-6b/ \
+--model_path=/home/mengchen/models/chatglm3-6b-cpu/ \
+--dtype=bf16 \
+--output_len=2000 \
+--chat=false \
+--do_sample=True \
+--temperature=0.8 \
+--top_k=1 \
+--top_p=0.8 \
+--streaming=false \
+--padding=false \
+--rep_penalty=1.2

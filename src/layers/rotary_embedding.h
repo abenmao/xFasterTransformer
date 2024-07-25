@@ -56,13 +56,14 @@ public:
             int *positionIds);
 
 private:
-    bool initialized = false;
+    void yarnFindRange(int &low, int &high, int betaFast, int betaSlow, int dim, float base, int orgMaxPosEmbed);
+    void yarnLinearRampMask(float *invFreqMask, int low, int high, int dim, float extraFactor);
+
+private:
     int inv_freq_size = -1;
     int dim = -1;
     int max_position_embeddings = -1;
-    int base = -1;
-    std::string rope_type;
-    float scaling_factor = 1.0;
+    float base = -1;
     float *inv_freq = nullptr;
     float *emb_cos = nullptr;
     float *emb_sin = nullptr;

@@ -52,7 +52,11 @@ public:
         : layerId(layerId), qkpo(ctx->attHeadSize, ctx->maxPosEmbed), norm(ctx) {
 
         //todo(marvin): clear this code after all rotary_emb refactor
-        if constexpr (std::is_same<QKPO_CLS, LlamaRotaryEmbedding>::value) { qkpo = LlamaRotaryEmbedding(ctx); }
+        if constexpr (std::is_same<QKPO_CLS, LlamaRotaryEmbedding>::value) {
+            qkpo = LlamaRotaryEmbedding(ctx);
+	    // mengchen : the one above has some issue if two models created
+            // qkpo = LlamaRotaryEmbedding(ctx->attHeadSize, ctx->maxPosEmbed);
+	}
         if constexpr (std::is_same<QKPO_CLS, ChatGLM2RotaryEmbedding>::value) { qkpo = ChatGLM2RotaryEmbedding(ctx); }
 
         // Group attention or multi-head attention (multi-head attn is a special case of group attn)

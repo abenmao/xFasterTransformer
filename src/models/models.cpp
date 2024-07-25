@@ -901,6 +901,190 @@ void Model::createSearcher(SearcherConfig &config_) {
     }
 }
 
+// lookahead N tokens based on previous rejected tokens and rectified input tokens
+std::vector<std::vector<int32_t>> Model::lookaheadN(int n, std::vector<int> &rejectedNTokens_,
+		std::vector<int32_t> &rectInputId_) {
+    // if rejectedNTokens is not nullptr, then reset PastLen and rect input ids for each seqs.
+    std::vector<SequenceMeta *> workingSeqs;
+    int nSamples = batchSize;
+    if (rejectedNTokens_.size() > 0) {
+//#pragma omp parallel for
+        for (int i = 0; i < workingGroup.size(); i++) {
+            // get the sequence
+            auto x = workingGroup[i]->get(0);
+            int pastLen = x->getPastSeqLen();
+            int resetPastLen = pastLen - rejectedNTokens_[i] + 1;
+            if (resetPastLen > pastLen) {
+                // for prefilling the kvcache of last token
+                x->setInputSeqLen(x->getInputSeqLen() + resetPastLen - pastLen);
+                nSamples += resetPastLen - pastLen;
+            } else {
+                x->setPastSeqLen(resetPastLen);
+            }
+            x->rectGenTokens(rejectedNTokens_[i], {rectInputId_[i]});
+            std::cout << "lookahead group " << workingGroup[i]->getGroupID() << " input " << x->getInputSeqLen() << " rectToken " << rectInputId_[i] << std::endl;
+        }
+    }
+
+    std::vector<std::vector<int32_t>> genTokens(workingGroup.size());
+    std::tuple<float *, int, int> result;
+    std::vector<int32_t> rawRet;
+    std::vector<int32_t> ret(batchSize);
+    while (n-- > 0) {
+        workingSeqs.clear();
+//#pragma omp parallel for
+        for (int i = 0; i < workingGroup.size(); i++) {
+            // get the sequence
+            auto x = workingGroup[i]->get(0);
+            workingSeqs.push_back(x);
+            //std::cout << "model step " << x->getStep() << " input " << x->getInputSeqLen()
+            //    << " past " << x->getPastSeqLen() << " inputToken ";
+            if (x->getInputSeqLen() < 20)
+                for (auto t : x->getInputTokens()) {
+                    std::cout << t << " ";
+                }
+            else
+                std::cout << " too long input, so ignore ";
+        }
+        // computing logits for the last token (all tokens when input > 1
+        // since 'logitRows in common_decoder.h')
+        result = decoder->forward(workingSeqs, false);
+        float *outBuf = std::get<0>(result);
+        int sampleOffset = std::get<1>(result);
+        int sampleSize = std::get<2>(result);
+        //std::cout << "model result " << sampleOffset << " " << sampleSize << " retN " << nSamples << std::endl;
+
+        // Greedy search
+        rawRet = greedySearch(outBuf, sampleOffset, sampleSize, nSamples);
+        assert(rawRet.size() == nSamples);
+
+        int idx = -1;
+//#pragma omp parallel for
+        for (int i = 0; i < workingGroup.size(); i++) {
+            auto x = workingGroup[i]->get(0);
+	    if (nSamples > batchSize)
+                idx += x->getInputSeqLen();
+	    else
+                idx ++;
+            ret[i] = rawRet[idx];
+        }
+
+        // Check stop status
+        stopCheck(ret, workingGroup);
+
+        // Step forward on all seqs, including setPastLen, addNextToken, addStep
+#pragma omp parallel for
+        for (int i = 0; i < workingGroup.size(); i++) {
+            auto x = workingGroup[i]->get(0);
+            // step forward
+            x->setPastSeqLen(x->getPastSeqLen() + x->getInputSeqLen());
+            x->setInputSeqLen(1);
+            nSamples = batchSize;
+            x->addNextToken(ret[i]);
+            x->setStep(x->getStep() + 1);
+            genTokens[i].push_back(ret[i]);
+        }
+    }
+    return genTokens;
+}
+
+// generate the post-token for each in lastN inputs seqs
+std::tuple<std::vector<int32_t>, std::vector<int>> Model::validateBatch(int lastN_, std::vector<std::vector<int32_t>> &inputIds_) {
+    // reset step (as if this is prefill), although there might be a non-zero pastSeqLen.
+    std::vector<SequenceMeta *> workingSeqs;
+    int nSamples = 0;
+//#pragma omp parallel for
+    for (int i = 0; i < workingGroup.size(); i++) {
+	// get the sequence
+        auto x = workingGroup[i]->get(0);
+        if (inputIds_.size() > 0) {
+            // inputs includes the previous one before inputIds_[0]
+            x->setInputSeqLen(inputIds_[i].size() + 1);
+            x->rectGenTokens(0, inputIds_[i]);
+        }
+        workingSeqs.push_back(x);
+        nSamples += x->getInputSeqLen();
+        std::cout << "validate group " << workingGroup[i]->getGroupID() << " input " << x->getInputSeqLen() << std::endl;
+    }
+
+    // computing logits of all tokens from inputs
+    std::tuple<float *, int, int> result = decoder->forward(workingSeqs, true);
+    float *outBuf = std::get<0>(result);
+    int sampleOffset = std::get<1>(result);
+    int sampleSize = std::get<2>(result);
+    std::cout << "valid sampleOffsetSize " << sampleOffset << " " << sampleSize << " " << nSamples << std::endl;
+
+    // Greedy search for all tokens
+    std::vector<int32_t> ret = greedySearch(outBuf, sampleOffset, sampleSize, nSamples);
+    assert(ret.size() == nSamples);
+    std::cout << "valid greedySearch size " << ret.size();
+    if (ret.size() < 20)
+        for (auto x : ret) {
+            std::cout << " " << x;
+        }
+    else
+        std::cout << " too long input, so ignore.";
+    std::cout << std::endl;
+
+    // validate each generated token whether equal to the next token in the inputs
+    int offset  = -1; // the last one is new generated token
+    std::vector<int> rejectedK(workingGroup.size(), 0);
+    std::vector<int32_t> rectTokens(workingGroup.size(), -1);
+//#pragma omp parallel for
+    for (int i = 0; i < workingGroup.size(); i++) {
+	// get the sequence
+        auto x = workingGroup[i]->get(0);
+        std::cout << "validate step " << x->getStep() << " input " << x->getInputSeqLen()
+            << " past " << x->getPastSeqLen() << " inputToken";
+        if (x->getInputSeqLen() < 20)
+            for (auto t : x->getInputTokens()) {
+                std::cout << " " << t;
+            }
+        else
+            std::cout << " too long input, so ignore.";
+        std::cout << std::endl;
+        int ntokens = x->getInputSeqLen();
+        offset += ntokens;
+        for (int j = lastN_; j > 0; j--) {
+            std::cout << "validj " << j << " " << x->getInputTokens()[ntokens - j] << " " << offset << " " << ret[offset - j] << std::endl;
+            if (x->getInputTokens()[ntokens - j] != ret[offset - j]) {
+                rectTokens[i] = ret[offset - j];
+                rejectedK[i] = j;
+                break;
+            }
+        }
+
+        // all accepted, record the new generated token
+        if (rectTokens[i] == -1)
+            rectTokens[i] = ret[ntokens - 1];
+
+        std::cout << "valid task " << i << " reject " << rejectedK[i] << " and rect " << rectTokens[i] << std::endl;
+
+        // Step forward on all seqs, only add accepted tokens
+        x->setPastSeqLen(x->getPastSeqLen() + x->getInputSeqLen() - rejectedK[i]);
+        if (inputIds_.size() > 0) {
+            x->rectGenTokens(rejectedK[i], {rectTokens[i]});
+        } else {
+            for (int j = lastN_; j >= rejectedK[i]; j--)
+                x->addNextToken(ret[offset - j]);
+        }
+        x->setStep(x->getStep() + 1);
+    }
+
+    return std::tuple<std::vector<int32_t>, std::vector<int>>(rectTokens, rejectedK);
+}
+
+// get generated tokens list for each seqs
+std::vector<std::vector<int32_t>> Model::getGeneratedTokens() {
+    std::vector<std::vector<int32_t>> ret;
+    for (int i = 0; i < workingGroup.size(); i++) {
+        // get the sequence
+        auto x = workingGroup[i]->get(0);
+        ret.push_back(x->getGeneratedTokens());
+    }
+    return ret;
+}
+
 bool Model::isMaster() {
     return decoder->isMaster();
 }
