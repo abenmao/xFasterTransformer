@@ -29,5 +29,8 @@ TORCH_LIBRARY(xfastertransformer, m) {
             .def("finalize", &TorchAutoModel::finalize)
             .def("free_seqs", &TorchAutoModel::freeSeqs)
             .def("set_prefix", &TorchAutoModel::setPrefix)
-            .def("unset_prefix", &TorchAutoModel::unsetPrefix);
+            .def("unset_prefix", &TorchAutoModel::unsetPrefix)
+            .def("is_prompt", &TorchAutoModel::isPrompt)
+            .def("get_spec_proposals", &TorchAutoModel::getProposals)
+            .def("verify_tokens", &TorchAutoModel::verifyTokens);
 }

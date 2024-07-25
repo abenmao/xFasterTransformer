@@ -280,6 +280,64 @@ public:
         return ret;
     }
 
+    bool isPrompt(torch::optional<bool> isPrompt_) {
+        int32_t value = (bool)isPrompt_.value() ? 1 : 0;
+        return (model->isPrompt(value) == 1);
+    }
+
+    torch::Tensor getProposals(int64_t lookaheadK_, torch::optional<torch::Tensor> rejectedN_,
+	    torch::optional<torch::Tensor> rectTokens_) {
+        std::vector<int> rejectedN;
+        std::vector<int32_t> rectTokens;
+        int lookaheadK = static_cast<int>(lookaheadK_);
+        int N = rejectedN_.value().size(0);
+        if (model->getRank() == 0) {
+            rejectedN.resize(N);
+            torch::Tensor rejectedNTensor = rejectedN_.value().to(torch::kInt32);
+            memcpy(rejectedN.data(), rejectedNTensor.data_ptr<int>(), N * sizeof(int));
+
+            rectTokens.resize(N);
+            torch::Tensor rectTokensTensor = rectTokens_.value().to(torch::kInt32);
+            memcpy(rectTokens.data(), rectTokensTensor.data_ptr<int32_t>(), N * sizeof(int32_t));
+        }
+
+        std::vector<std::vector<int>> proposals = model->lookaheadN(lookaheadK, rejectedN, rectTokens);
+        std::vector<int> flatProp(proposals.size() * lookaheadK);
+        size_t index = 0;
+        for (const auto& row : proposals) {
+            for (int elem : row) {
+                flatProp[index++] = elem;
+            }
+        }
+
+        torch::Tensor ret = torch::from_blob(flatProp.data(), {static_cast<int>(proposals.size()), lookaheadK}, torch::kInt32).to(torch::kInt64);
+        return ret;
+    }
+
+    std::tuple<torch::Tensor, torch::Tensor> verifyTokens(int64_t lookaheadK_, torch::optional<torch::Tensor> proposals_) {
+        std::vector<std::vector<int>> proposals;
+        int lookaheadK = static_cast<int>(lookaheadK_);
+        int N = proposals_.value().size(0);
+        proposals.resize(N);
+        for (auto& row : proposals)
+            row.resize(lookaheadK);
+
+        int64_t* flatProp = proposals_.value().data_ptr<int64_t>();
+        for (int i = 0; i < N; ++i) {
+            for (int j = 0; j < lookaheadK; ++j) {
+                proposals[i][j] = (int)(flatProp[i * lookaheadK + j]);
+            }
+        }
+
+        auto res = model->validateBatch(lookaheadK, proposals);
+        std::vector<int32_t> rectTokens = std::get<0>(res);
+        std::vector<int> rejectedN = std::get<1>(res);
+
+        torch::Tensor ret0 = torch::from_blob(rejectedN.data(), {N}, torch::kInt32).to(torch::kInt64);
+        torch::Tensor ret1 = torch::from_blob(rectTokens.data(), {N}, torch::kInt32).to(torch::kInt64);
+        return std::make_tuple(ret0, ret1);
+    }
+
     bool freeSeqs(torch::optional<torch::Tensor> seqIDs_) {
         std::vector<int> seqIDs;
         if (model->getRank() == 0) {

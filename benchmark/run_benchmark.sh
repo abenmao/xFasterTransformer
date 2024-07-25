@@ -40,6 +40,10 @@ while [ -n "$1" ]; do
         model_name=$2
         shift 2
         ;;
+    -spec | --speculative_model)
+        spec_model=$2
+        shift 2
+        ;;
     -mp | --model_path)
         model_path=$2
         shift 2
@@ -116,6 +120,10 @@ while [ -n "$1" ]; do
         kv_cache_dtype=$2
         shift 2
         ;;
+    -spec_n | --num_speculative_tokens)
+        spec_num_tokens=$2
+        shift 2
+        ;;
     "")
         shift
         break
@@ -127,7 +135,14 @@ if [ "${model_name}" == "" ]; then
     Error "Please pass a value of model name using -m or --model_name."
     exit 1
 fi
+
 if [ "${model_path}" == "" ] || [ "${token_path}" == "" ]; then
+
+    if [ "${spec_model}" != "" ]; then
+        Error "Please pass a real value of model name using -m or --model_name & -spec or --speculative_model."
+        exit 1
+    fi
+
     Warning "Please pass both 'model_path' and 'token_path' at the same time if you want to use real model."
     Info "Using fake model mode now."
     export XFT_FAKE_MODEL=1
@@ -147,8 +162,15 @@ output_tokens=${output_tokens:-32}
 beam_width=${beam_width:-1}
 iter=${iter:-10}
 warmup=${warmup:-2}
+spec_model=${spec_model:-NULL}
+spec_num_tokens=${spec_num_tokens:-4}
 
 Info "You are using model ${model_name}, dtype ${dtype}, kvcache dtype ${kv_cache_dtype}, batch size ${batch_size}, input tokens ${input_tokens}, output tokens ${output_tokens}, beam width ${beam_width} and iteration ${iter} on ${sockets} sockets system."
+
+if [ "${spec_model}" != "" ] && [ "${beam_width}" != 1 ]; then
+    Error "Only support beam_width=1 for speculative infer."
+    exit 1
+fi
 
 if [ "$sockets" == 1 ]; then
     Info "Using the socket ${sockets_id}."
@@ -163,6 +185,8 @@ export XFT_CLOUD_ENV=${XFT_CLOUD_ENV:-0}
 benchmark_cmd="python "${SCRIPT_DIR}"/benchmark.py \
     --token_path "${token_path}" \
     --model_path "${model_path}" \
+    --speculative_model "${spec_model}" \
+    --num_speculative_tokens "${spec_num_tokens}" \
     --prompt_path "${SCRIPT_DIR}"/prompt.json \
     --model_name "${model_name}" \
     --dtype "${dtype}" \

@@ -130,13 +130,20 @@ class LlamaConvert(BaseModelConvert):
             config[sec_name]["layernorm_type"] = "pre_layernorm"
             config[sec_name]["activation_type"] = str(hf_config["hidden_act"])
             config[sec_name]["rope_theta"] = str(hf_config.get("rope_theta", 10000))
+
             rope_scaling = hf_config.get("rope_scaling", None)
             if rope_scaling:
-                config[sec_name]["scaling_factor"] = str(rope_scaling.get("factor", 1.0))
-                config[sec_name]["rope_type"] = str(rope_scaling.get("type", "null"))
+                config[sec_name]["rope_scaling_factor"] = str(rope_scaling.get("factor", 1.0))
+                config[sec_name]["rope_scaling_type"] = str(rope_scaling.get("type", "null"))
+                if config[sec_name]["rope_scaling_type"] == "yarn":
+                    config[sec_name]["rope_scaling_original_max_position_embeddings"] = str(
+                        rope_scaling.get("original_max_position_embeddings", 2048)
+                    )
+                    config[sec_name]["rope_scaling_finetuned"] = str(rope_scaling.get("finetuned", "false"))
             else:
-                config[sec_name]["scaling_factor"] = str(1.0)
-                config[sec_name]["rope_type"] = str("null")
+                config[sec_name]["rope_scaling_factor"] = str(1.0)
+                config[sec_name]["rope_scaling_type"] = str("null")
+
             config[sec_name]["has_post_decoder_layernorm"] = "1" if has_post_decoder_layernorm else "0"
             config[sec_name]["vocab_size"] = str(hf_config["vocab_size"])
             config[sec_name]["start_id"] = str(hf_config["bos_token_id"])

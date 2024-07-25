@@ -311,15 +311,44 @@ std::string getModelType(std::string &modelPath) {
     return modeltype;
 }
 
+void logLastNTokens(TokenizerBase *tokenizer, std::vector<std::vector<int32_t>> tokenIDs, int tokenCount) {
+    //return;
+    std::vector<std::string> ret;
+    for (int i = 0; i < tokenIDs.size(); ++i) {
+        std::vector<int> tokens(tokenIDs[i].end() - tokenCount, tokenIDs[i].end());
+        ret.emplace_back(tokenizer->decode(tokens));
+    }
+    std::cout << "'" << ret[0] << "'"<< std::endl;
+}
+
+int dynamicAdjustLookahead(int lookaheadK, int acceptedK, int batchSize) {
+    static std::vector<int> acceptedKVec;
+    acceptedKVec.push_back(acceptedK);
+
+    // 100 refer to flops/byte of the specified hardware
+    // 100 for bs16
+    int maxK = std::min(8, 100 / batchSize);
+    int minK = maxK / 2;
+
+    if (acceptedK <= lookaheadK / 2)
+        lookaheadK = std::max(minK, lookaheadK / 2);
+    else if (acceptedK == lookaheadK)
+        lookaheadK = std::min(maxK, lookaheadK * 2);
+    return lookaheadK;
+}
+
 int main(int argc, char **argv) {
     cmdline::parser args;
 
     args.add<std::string>("model", 'm', "path of xft format model", true);
     args.add<std::string>("token", 't', "path of tokenizer", true);
+    args.add<std::string>("draft_model", '\0', "path of xft format model of draft", true);
     args.add<std::string>("input", 'i', "input prompt, invalid for Opt model.", false,
             "Once upon a time, there existed a little girl who liked to have adventures.");
     args.add<std::string>("dtype", 'd', "weight data type", false, "fp16");
+    //args.add<std::string>("draft_dtype", 'd', "weight data type for draft model", false, "fp16");
     args.add<std::string>("kv_cache_dtype", '\0', "kv cache data type", false, "fp16");
+    //args.add<std::string>("draft_kv_cache_dtype", '\0', "kv cache data type for draft model", false, "fp16");
     args.add<int>("input_len", 'l', "input token size", false, -1);
     args.add<int>("output_len", 'o', "max tokens can generate excluded input.", false, 100, cmdline::range(1, 8192));
     args.add<int>("prefix_len", '\0', "shared prefix tokens num.", false, 0);
@@ -378,9 +407,17 @@ int main(int argc, char **argv) {
     std::string inputPrompt = args.get<std::string>("input");
     std::vector<int> input = tokenizer->encode(inputPrompt);
 
+    // longer context should be declared in the last, since the bug in xFT
+    //xft::AutoModel model(modelPath, dtype, KVCacheDataType);
+
+    // draft model creation
+    std::string draftModelPath = args.get<std::string>("draft_model");
+    xft::AutoModel draftModel(draftModelPath, dtype, KVCacheDataType);
+
+    // longer context should be declared in the last, since the bug in xFT
     xft::AutoModel model(modelPath, dtype, KVCacheDataType);
+
     bool isMaster = model.isMaster();
-    int secondIdCount = 0;
 
     // Need longer prompt
     if (inputSize > 0 && inputSize > input.size()) {
@@ -390,29 +427,12 @@ int main(int argc, char **argv) {
     } else if (inputSize > 0) {
         printf("[Warning] Do not support token size of %d, use %ld instead.\n", inputSize, input.size());
     }
+
     inputSize = input.size();
-    int maxLen = input.size() + outputLen;
-
-    std::vector<int> perfixSeq;
-    if (prefixLen > 0) {
-        if (prefixLen <= input.size()) {
-            perfixSeq = std::vector<int>(input.begin(), input.begin() + prefixLen);
-        } else {
-            printf("[ERROR] Prefix length %d is larger than input size %ld.\n", prefixLen, input.size());
-            exit(-1);
-        }
-    }
-
-    if (batchSize > 1) {
-        int len = input.size();
-        input.resize(len * batchSize);
-        for (int i = 1; i < batchSize; i++) {
-            std::copy(input.begin(), input.begin() + len, input.begin() + i * len);
-        }
-    }
 
     if (isMaster) {
         std::cout << "[INFO] Model path is " << modelPath << std::endl;
+        std::cout << "[INFO] DraftModel path is " << draftModelPath << std::endl;
         std::cout << "[INFO] Token path is " << tokenPath << std::endl;
         std::cout << "[INFO] Data type is " << dtype_name << std::endl;
         std::cout << "[INFO] KV cache data type is " << kv_cache_dtype_name << std::endl;
@@ -426,11 +446,6 @@ int main(int argc, char **argv) {
         std::cout << "[INFO] repetitionPenalty is " << repetitionPenalty << std::endl;
         std::cout << "[INFO] batch_size is " << batchSize << std::endl;
         std::cout << "[INFO] loop is " << loop << std::endl;
-        if (prefixLen > 0) {
-            std::cout << "[INFO] prefixSharing is ON, perfixLen is " << prefixLen << std::endl;
-        } else {
-            std::cout << "[INFO] prefixSharing is OFF" << std::endl;
-        }
         std::cout << "[INFO] Input prompt is : " << inputPrompt << std::endl;
         std::cout << "[INFO] Input Token Ids is : ";
         for (auto x : input) {
@@ -439,67 +454,92 @@ int main(int argc, char **argv) {
         std::cout << std::endl;
     }
 
-    // Set prefix
-    if (prefixLen > 0) { model.setPrefix(perfixSeq); }
+    for (int l = 0; l < loop; ++l) {
+        std::vector<std::vector<int>> inputIDs, placeholder;
+        // request sequence id
+        std::vector<int> dseqs, seqs;
+        std::vector<int> rejectedK;
+        std::vector<int32_t> rectInputId;
 
-    for (int i = 0; i < loop; ++i) {
-        secondIdCount = 0;
+        // lookahead init value
+        int lookahead_k = 8;
 
-        // TODO: Deprecated this old path
-        model.config(/*maxLen*/ maxLen, /*numBeams*/ numBeams, /*numBeamHypsToKeep*/ 1, /*lenPenalty*/ 1.0,
-                /*doEarlyStopping*/ false, /*eosTokenId*/ -1, /*padTokenId*/ -1,
-                /*doSample*/ doSample, /*temperature*/ temperature,
-                /*topK*/ topK, /*topP*/ topP, /*repetitionPenalty*/ repetitionPenalty);
-        model.input(input, batchSize);
+        SearcherConfig config;
+        config.maxLen = input.size() + outputLen + lookahead_k * 2;
 
-        // New path
-        // model.set_input(input, batchSize, /*maxLen*/ maxLen, /*numBeams*/ numBeams, /*numBeamHypsToKeep*/ 1,
-        //         /*lenPenalty*/ 1.0,
-        //         /*doEarlyStopping*/ false, /*eosTokenId*/ -1, /*padTokenId*/ -1,
-        //         /*doSample*/ doSample, /*temperature*/ temperature,
-        //         /*topK*/ topK, /*topP*/ topP, /*repetitionPenalty*/ repetitionPenalty);
+        Timer spec(true, "Spec infer");
 
-        std::vector<int> firstIds;
-        std::vector<int> secondIds;
+        for (int n = 0; n < batchSize; ++n)
+            inputIDs.push_back(input);
+        seqs = model.set_input(inputIDs, seqs, config);
+        // validation prefill
+        auto res = model.validateBatch(0, placeholder);
+        auto firstId = std::get<0>(res);
+        for (int n = 0; n < inputIDs.size(); ++n)
+            inputIDs[n].push_back(firstId[n]);
 
-        if (!model.isDone()) {
-            Timer t(isMaster, "[INFO] First token");
-            firstIds = model.generate();
-        }
+        Timer gen(true, "Gen-only infer");
+        int tokenCount = 1;
+        // just for the first seq [0], TODO: mengchen
+        while (tokenCount < outputLen) {
+            lookahead_k = std::min(lookahead_k, outputLen - tokenCount);
+            {
+            Timer lookahead(true, "lookahead N");
 
-        Timer timerSecond;
-        if (!model.isDone()) {
-            secondIds = model.generate();
-            secondIdCount++;
-        }
+            // create new workingGroup(with kvCaches) for the lookahead task thread
+            if (dseqs.size() == 0)
+                dseqs = draftModel.set_input(inputIDs, dseqs, config);
 
-        if (isMaster && streamingOutput) {
-            if (!firstIds.empty()) {
-                tokenizer->printResult(firstIds, batchSize, numBeams);
-                if (!secondIds.empty()) { tokenizer->printResult(secondIds, batchSize, numBeams); }
+	    // inferencing
+            auto proposals = draftModel.lookaheadN(lookahead_k, rejectedK, rectInputId);
+
+	    // prepare inputIDs for validate
+            // if validation has finished prefill
+            if (seqs.size() > 0)
+                inputIDs.clear();
+            for (int i = 0; i < proposals.size(); ++i) {
+                // if validation has finished prefill
+                if (seqs.size() > 0)
+                    inputIDs.push_back(proposals[i]);
+                else
+                    inputIDs[i].insert(inputIDs[i].end(), proposals[i].begin(), proposals[i].end());
             }
-        }
-
-        while (!model.isDone()) {
-            auto nextIds = model.generate();
-            secondIdCount++;
-            if (isMaster && streamingOutput) { tokenizer->printResult(nextIds, batchSize, numBeams); }
-        }
-        if (isMaster && secondIdCount > 0) {
-            auto avgDuration = timerSecond.getTime() / float(secondIdCount);
-            auto throughput = secondIdCount * batchSize / float(timerSecond.getTime()) * 1000.0;
-            std::cout << std::endl << "[INFO] Second avg token time: " << avgDuration << " ms Throughput: " << throughput << std::endl;
-        }
-        auto result = model.finalize();
-
-        if (isMaster) {
-            std::cout << "\n[INFO] Final output is: " << std::endl;
-            std::vector<std::string> sent = tokenizer->batchDecode(result, batchSize);
-            for (auto str : sent) {
-                std::cout << "==============================================" << std::endl;
-                std::cout << str << std::endl;
             }
+
+            // logging
+            logLastNTokens(tokenizer, draftModel.getGeneratedTokens(), lookahead_k);
+
+            {
+            Timer validate(true, "validate batch");
+
+            // create new workingGroup(with kvCaches) for the validation task thread
+            if (seqs.size() == 0) {
+                seqs = model.set_input(inputIDs, seqs, config);
+                inputIDs.clear();
+            }
+            // validating
+            auto res = model.validateBatch(lookahead_k, inputIDs);
+            // prepare the rectified tokens for lookahead
+            rectInputId = std::get<0>(res);
+            rejectedK = std::get<1>(res);
+            // update gen token count, just for the first seq [0], TODO: mengchen
+            tokenCount += lookahead_k - rejectedK[0] + 1;
+            }
+
+            // logging
+            for (int n=0; n<rectInputId.size(); ++n) {
+                std::cout << "rejected " << rejectedK[n] << " rect " << rectInputId[n] << std::endl;
+            }
+            // just for the first seq [0], TODO: mengchen
+            logLastNTokens(tokenizer, model.getGeneratedTokens(), lookahead_k - rejectedK[0] + 1);
+
+            // adjust lookahead_k
+            lookahead_k = dynamicAdjustLookahead(lookahead_k, lookahead_k - rejectedK[0], seqs.size());
         }
+
+        // logging
+        logLastNTokens(tokenizer, model.getGeneratedTokens(), tokenCount);
+        std::cout << "gen tokens " << tokenCount << std::endl;
     }
 
     return 0;

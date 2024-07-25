@@ -74,6 +74,8 @@ KVCACHE_DTYPE_LIST = ["fp16", "int8"]
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model_name", type=str, default=None, help="Model name")
+parser.add_argument('--speculative_model', type=str, default=None, help="Spec Model name")
+parser.add_argument('--num_speculative_tokens', type=int, default=None, help="num of lookahead tokens")
 parser.add_argument("--token_in", type=str, default="32", help="Input Token Len")
 parser.add_argument("--token_out", type=int, default=32, help="Output Token Len, MaxLen=IN+OUT")
 parser.add_argument("--beam_width", type=int, default=1, help="Beam Search Width")
@@ -162,6 +164,11 @@ if __name__ == "__main__":
 
         print("[INFO] xfastertransformer is not installed in pip, using source code.")
 
+    if args.speculative_model != 'NULL':
+        draft_model = xfastertransformer.AutoModel.from_pretrained(
+            args.speculative_model, dtype=args.dtype, kv_cache_dtype=args.kv_cache_dtype
+        )
+        lookahead_k = args.num_speculative_tokens
     model = xfastertransformer.AutoModel.from_pretrained(
         args.model_path, dtype=args.dtype, kv_cache_dtype=args.kv_cache_dtype
     )
@@ -170,15 +177,17 @@ if __name__ == "__main__":
     model_max_seq_len = _config[_config.sections()[0]]["max_pos_seq_len"]
     model_max_seq_len = int(model_max_seq_len) if model_max_seq_len.isdigit() else 0
 
-    if model.rank == 0:
+    if model.rank == 0 or args.speculative_model != 'NULL':
         # input prompt
-        print("======start=======")
-        print("[INFO] input argparse = ", args)
+        if model.rank == 0:
+            print("======start=======")
+            print("[INFO] input argparse = ", args)
         if args.input_prompt is not None:
             input_prompt = args.input_prompt
         elif args.token_in in model_prompt:
             input_prompt = model_prompt[args.token_in]
-            print(input_prompt)
+            if model.rank == 0:
+                print(input_prompt)
         else:
             raise SystemExit("[ERROR] Plese use --input_prompt if you want custom input.")
         for _ in range(args.batch_size):
@@ -193,13 +202,15 @@ if __name__ == "__main__":
         input_token_nums = int(torch.numel(input_ids) / args.batch_size)
         if args.token_in is not None and int(args.token_in) != input_token_nums:
             print(f"[WARN] input_token_size ({input_token_nums}) != required_input_size ({args.token_in})")
-        print("Input token Length is", input_token_nums)
-        print("Batch_size:", args.batch_size)
+        if model.rank == 0:
+            print("Input token Length is", input_token_nums)
+            print("Batch_size:", args.batch_size)
         max_len = input_token_nums + args.token_out
         if max_len > model_max_seq_len and model_max_seq_len > 0:
             raise SystemExit("[ERROR] input_token length + output_token length > max_pos_seq_len.")
-        print("Max_len:", max_len)
-        print("=" * 50)
+        if model.rank == 0:
+            print("Max_len:", max_len)
+            print("=" * 50)
         # Perform 100 runs and store execution times in a list
         execution_times = []
         first_token_times = []
@@ -207,32 +218,64 @@ if __name__ == "__main__":
         total_times = []
         # warm up
         for i in range(args.warmup):
+            if args.speculative_model != 'NULL':
+                draft_model.generate(input_ids, num_beams=args.beam_width, max_length=max_len, streamer=None)
             model.generate(input_ids, num_beams=args.beam_width, max_length=max_len, streamer=None)
 
-        print("Start benchmark:")
+        if model.rank == 0: print("Start benchmark:")
         for i in range(args.iteration):
-            print("iteration", i, ":")
+            if model.rank == 0: print("iteration", i, ":")
             model.config(max_length=max_len, num_beams=args.beam_width)
             model.input(input_ids)
             # first token
             start_time = time.perf_counter()
-            next_tokens = model.forward()
+            if args.speculative_model != 'NULL':
+                xft_max_lens = []
+                xft_rejected_n = []
+                xft_rect_tokens = []
+                spec_max_len = max_len + lookahead_k * 2
+                for _ in range(args.batch_size):
+                    xft_max_lens.append(spec_max_len)
+                xft_ids = model.set_input_cb(input_ids, None, xft_max_lens).tolist()
+                next_tokens = model.get_spec_proposals(1)
+                xft_draft_ids = draft_model.set_input_cb(input_ids, None, xft_max_lens).tolist()
+                prop = draft_model.get_spec_proposals(1)
+                for _ in range(args.batch_size):
+                    xft_rejected_n.append(1)
+                    xft_rect_tokens.append(next_tokens[0])
+            else:
+                next_tokens = model.forward()
             first_token_time = time.perf_counter() - start_time
             first_token_times.append(first_token_time)
             # remaining tokens
             cost_list = []
             token_list = [next_tokens.view(-1).tolist()[0]]
-            while not model.is_done():
+            while not model.is_done() and len(token_list) < args.token_out:
                 start_time = time.perf_counter()
-                next_tokens = model.forward()
-                next_time = time.perf_counter() - start_time
-                cost_list.append(next_time)
-                token_list.append(next_tokens.view(-1).tolist()[0])
+                if args.speculative_model != 'NULL':
+                    proposals = draft_model.get_spec_proposals(lookahead_k, xft_rejected_n, xft_rect_tokens)
+                    xft_rejected_n, xft_rect_tokens = model.verify_tokens(lookahead_k, proposals)
+                    if xft_rejected_n[0] != 0:
+                        token_list.extend(proposals[0][:-xft_rejected_n[0]].tolist())
+                    else:
+                        token_list.extend(proposals[0][:].tolist())
+                    token_list.append(xft_rect_tokens[0].tolist())
+                    next_time = time.perf_counter() - start_time
+                    n_toks = lookahead_k - xft_rejected_n[0] + 1
+                    for _ in np.arange(n_toks):
+                        cost_list.append(next_time / float(n_toks))
+                else:
+                    next_tokens = model.forward()
+                    token_list.append(next_tokens.view(-1).tolist()[0])
+                    next_time = time.perf_counter() - start_time
+                    cost_list.append(next_time)
             generated_ids = model.finalize()
             total_times.append(first_token_time + sum(cost_list))
             next_token_times += cost_list
             response = tokenizer.decode(token_list, skip_special_tokens=True)
-            print(f"    Response: {response}")
+            if model.rank == 0: print(f"    Response: {response}")
+
+        if model.rank != 0: exit(0)
 
         total_times = list(map(lambda x: x * 1000, total_times))
         first_token_times = list(map(lambda x: x * 1000, first_token_times))

@@ -188,6 +188,8 @@ private:
     int layers_;
 };
 
+static int maxHeadNum = 0;
+static int maxHeadSize = 0;
 class KVCacheMgr {
 public:
     static KVCacheMgr &instance() {
@@ -196,6 +198,10 @@ public:
     }
 
     void configure(int maxSeqLen, int headNum, int headSize, int layers, DataType dataType) {
+	headNum = headNum > maxHeadNum ? headNum : maxHeadNum;
+	headSize = headSize > maxHeadSize ? headSize : maxHeadSize;
+	maxHeadNum = headNum;
+	maxHeadSize = headSize;
         switch (dataType) {
             case DataType::int8: cacheMgrImpl = new KVCacheMgrImpl<int8_t>(maxSeqLen, headNum, headSize, layers); break;
             case DataType::fp16:

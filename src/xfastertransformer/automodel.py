@@ -81,6 +81,35 @@ class AutoModel:
     def forward_cb(self):
         return self.model.forward_cb()
 
+    def is_prompt(self, is_prompt: Optional[bool] = False):
+        return self.model.is_prompt(is_prompt)
+
+    def get_spec_proposals(
+        self,
+        lookahead_k,
+        rejected_n: Optional[Union[List[int], torch.Tensor]] = None,
+        rect_tokens: Optional[Union[List[int], torch.Tensor]] = None,
+    ):
+        if rejected_n is None:
+            rejected_n = []
+        if isinstance(rejected_n, list):
+            rejected_n = torch.tensor(rejected_n, dtype=torch.int64)
+        if rect_tokens is None:
+            rect_tokens = []
+        if isinstance(rect_tokens, list):
+            rect_tokens = torch.tensor(rect_tokens, dtype=torch.int64)
+        return self.model.get_spec_proposals(lookahead_k, rejected_n, rect_tokens)
+
+    def verify_tokens(
+        self,
+        lookahead_k,
+        proposals: Optional[Union[List[int], List[List[int]], torch.Tensor]] = None):
+        if proposals is None:
+            proposals = []
+        if isinstance(proposals, list):
+            proposals = torch.tensor(proposals, dtype=torch.int64)
+        return self.model.verify_tokens(lookahead_k, proposals)
+
     def free_seqs(self, seq_ids: Optional[Union[List[int], torch.Tensor]] = None):
         if isinstance(seq_ids, list):
             seq_ids = torch.tensor(seq_ids, dtype=torch.int64)

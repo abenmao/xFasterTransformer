@@ -19,17 +19,21 @@
 #include "timeline.h"
 
 LlamaRotaryEmbedding::LlamaRotaryEmbedding(DecoderContext *ctx) {
-    const std::string inv_freq_str = "inv_freq";
-    const std::string emb_cos_str = "emb_cos";
-    const std::string emb_sin_str = "emb_sin";
+    std::stringstream ss;
+    ss << std::hex << reinterpret_cast<std::uintptr_t>(ctx);
+    const std::string inv_freq_str = "inv_freq" + ss.str();
+    const std::string emb_cos_str = "emb_cos" + ss.str();
+    const std::string emb_sin_str = "emb_sin" + ss.str();
+    if (ctx->ropeParamsPtr->type != "" && ctx->ropeParamsPtr->type != "null"
+            && ctx->ropeParamsPtr->type != "linear" && ctx->ropeParamsPtr->type != "yarn") {
+        printf("Not supported Rope Scaling Type %s\n", ctx->ropeParamsPtr->type.c_str());
+        exit(-1);
+    }
 
     this->device = ctx->device;
     this->dim = ctx->attHeadSize;
     this->max_position_embeddings = ctx->maxPosEmbed;
-    ctx->GetAttr("rope_theta", &this->base, 10000);
-    ctx->GetAttr("rope_type", &this->rope_type, std::to_string(-1));
-
-    if (this->rope_type == "linear") ctx->GetAttr("scaling_factor", &this->scaling_factor, 1.0f);
+    this->base = ctx->ropeParamsPtr->base;
 
     inv_freq_size = (dim + 1) / 2;
 
@@ -37,12 +41,26 @@ LlamaRotaryEmbedding::LlamaRotaryEmbedding(DecoderContext *ctx) {
     emb_sin = ctx->getBuffer<float>(emb_sin_str, max_position_embeddings * inv_freq_size);
 
     if (!ctx->cached(inv_freq_str)) {
+        printf("Init Rope Scaling Type %s %d %d %lf %d %lf\n", ctx->ropeParamsPtr->type.c_str(), dim, max_position_embeddings, ctx->ropeParamsPtr->scale, inv_freq_size, base);
         inv_freq = ctx->getBuffer<float>(inv_freq_str, inv_freq_size);
 
         for (size_t i = 0; i < inv_freq_size; i++) {
             inv_freq[i] = 1.0 / pow(base, float(i * 2) / dim);
-            inv_freq[i] /= this->scaling_factor;
+            inv_freq[i] /= ctx->ropeParamsPtr->scale;
         }
+
+        if (ctx->ropeParamsPtr->type == "yarn") {
+            int low, high;
+            yarnFindRange(low, high, ctx->ropeParamsPtr->betaFast, ctx->ropeParamsPtr->betaSlow, dim, base,
+                    ctx->ropeParamsPtr->orgMaxPosEmbed);
+
+            float *invFreqMask = (float *)malloc(inv_freq_size * sizeof(float));
+            yarnLinearRampMask(invFreqMask, low, high, inv_freq_size, ctx->ropeParamsPtr->extraPolFactor);
+            for (size_t i = 0; i < inv_freq_size; i++) {
+                inv_freq[i] = inv_freq[i] * (1 - invFreqMask[i]) + inv_freq[i] * invFreqMask[i];
+            }
+        }
+
         xft::llamaSetCosSinCache(inv_freq, emb_cos, emb_sin, inv_freq_size, max_position_embeddings);
     } else if (dim != inv_freq_size * 2) {
         printf("Incorrect dim=%d, inv_freq_size=%d\n", dim, inv_freq_size);
@@ -62,6 +80,28 @@ LlamaRotaryEmbedding::LlamaRotaryEmbedding(DecoderContext *ctx) {
         }
     }
 #endif
+}
+
+void LlamaRotaryEmbedding::yarnFindRange(
+        int &low, int &high, int betaFast, int betaSlow, int dim, float base, int orgMaxPosEmbed) {
+    float flow = dim * std::log(orgMaxPosEmbed / (betaFast * 2 * M_PI)) / (2 * std::log(base));
+    float fhigh = dim * std::log(orgMaxPosEmbed / (betaSlow * 2 * M_PI)) / (2 * std::log(base));
+    low = std::max(int(floor(flow)), 0);
+    high = std::min(int(ceil(fhigh)), dim - 1);
+}
+
+void LlamaRotaryEmbedding::yarnLinearRampMask(
+        float *invFreqMask, int low, int high, int dim, float extraFactor) {
+    float min = low, max = high;
+    if (min == max) max += 0.001;
+
+    for (int i = 0; i < dim; ++i) {
+        invFreqMask[i] = ((float)i - min) / (max - min);
+    }
+
+    for (int i = 0; i < dim; ++i) {
+        invFreqMask[i] = (1.0 - std::clamp(invFreqMask[i], 0.0f, 1.0f)) * extraFactor;
+    }
 }
 
 // This API is deprecated, will delete after all rotary embed code refactor.
