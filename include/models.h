@@ -78,6 +78,10 @@ public:
 
     std::vector<int32_t> generate();
 
+    // for speculative inferencing
+    std::vector<std::vector<int32_t>> lookaheadN(int, std::vector<int>&, std::vector<int32_t>&);
+    std::tuple<std::vector<int32_t>, std::vector<int>> validateBatch(int, std::vector<std::vector<int32_t>>&);
+
     void createSearcher(SearcherConfig &config_);
 
     bool isMaster();

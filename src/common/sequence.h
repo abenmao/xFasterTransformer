@@ -144,6 +144,25 @@ public:
     // For next tokens
     void addNextToken(int32_t token) { generatedTokens.push_back(token); }
 
+    // For spec infer
+    void rectGenTokens(int nTrunc, std::vector<int32_t> tokens) {
+        while (nTrunc-- > 0) {
+            generatedTokens.pop_back();
+        }
+        for (auto x : tokens)
+            generatedTokens.push_back(x);
+    }
+    // For validate of spec infer
+    void setPromptTokens(std::vector<int32_t> _inputIds) {
+        inputSeqLen = _inputIds.size();
+        promptTokens.clear();
+        promptTokens.insert(promptTokens.end(), _inputIds.begin(), _inputIds.end());
+    }
+
+    void setInputSeqLen(int n) {
+        inputSeqLen = n;
+    }
+
     std::vector<int32_t> getTotalTokens() const {
         std::vector<int32_t> totalTokens = promptTokens;
         totalTokens.insert(totalTokens.end(), generatedTokens.begin(), generatedTokens.end());

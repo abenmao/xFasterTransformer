@@ -340,6 +340,7 @@ std::vector<int> Model::set_input(std::vector<std::vector<int32_t>> &inputIds_, 
     return seqIDs;
 }
 
+//mengchen set_input
 std::vector<int> Model::set_input(std::vector<std::vector<int32_t>> &inputIds_, std::vector<int> seqIDs,
         SearcherConfig &config_, const std::vector<std::vector<int>> &stopWordsList_) {
     if (config_.eosTokenId == -1) { config_.eosTokenId = decoder->getEndId(); }
@@ -899,6 +900,131 @@ void Model::createSearcher(SearcherConfig &config_) {
     } else if (genMode == GenerationMode::SAMPLE) {
         searcher = new SampleSearch(*decoder, config_);
     }
+}
+
+// lookahead N tokens based on previous rejected tokens and rectified input tokens
+std::vector<std::vector<int32_t>> Model::lookaheadN(int n, std::vector<int> &rejectedNTokens_,
+		std::vector<int32_t> &rectInputId_) {
+    // if rejectedNTokens is not nullptr, then reset PastLen and rect input ids for each seqs.
+    std::vector<SequenceMeta *> workingSeqs;
+    if (rejectedNTokens_.size() > 0) {
+        int idx = 0;
+        for (auto x : workingGroup) {
+            int resetPastLen = x->get(0)->getPastSeqLen() - rejectedNTokens_[idx] + 1;
+            // need prefill last token kvcache by forward once
+            if (resetPastLen > x->get(0)->getPastSeqLen()) {
+                printf("reset length %d is larger than the past length %d\n",
+                        resetPastLen, x->get(0)->getPastSeqLen());
+                exit(1);
+            }
+            x->get(0)->setPastSeqLen(resetPastLen);
+            x->get(0)->rectGenTokens(rejectedNTokens_[idx], {rectInputId_[idx]});
+            std::cout << "lookahead group " << x->getGroupID() << " input " << x->get(0)->getInputSeqLen() << " rectToken " << rectInputId_[idx] << std::endl;
+            idx++;
+        }
+    }
+
+    std::vector<std::vector<int32_t>> genTokens(workingGroup.size());
+    std::tuple<float *, int, int> result;
+    std::vector<int32_t> ret;
+    while (n-- > 0) {
+        workingSeqs.clear();
+        for (auto x : workingGroup) {
+            workingSeqs.push_back(x->get(0));
+            std::cout << "model step " << x->get(0)->getStep() << " input " << x->get(0)->getInputSeqLen()
+		    << " past " << x->get(0)->getPastSeqLen() << " inputToken " << x->get(0)->getInputTokens()[0] << std::endl;
+        }
+        // computing logits for the last token
+        result = decoder->forward(workingSeqs, false);
+        float *outBuf = std::get<0>(result);
+        int sampleOffset = std::get<1>(result);
+        int sampleSize = std::get<2>(result);
+        std::cout << "model result " << sampleOffset << " " << sampleSize << " bs " << batchSize << std::endl;
+
+        // Greedy search
+        ret = greedySearch(outBuf, sampleOffset, sampleSize, batchSize);
+        std::cout << "model search" << std::endl;
+        assert(ret.size() == batchSize);
+
+        // Check stop status
+        stopCheck(ret, workingGroup);
+        std::cout << "model topCheck" << std::endl;
+
+        // Step forward on all seqs, including setPastLen, addNextToken, addStep
+        for (int i = 0; i < workingGroup.size(); i++) {
+            workingGroup[i]->get(0)->stepForward(ret[i]);
+            std::cout << "ret " << ret[i] << " ";
+            genTokens[i].push_back(ret[i]);
+        }
+    }
+    return genTokens;
+}
+
+// generate the post-token for each in lastN inputs seqs
+std::tuple<std::vector<int32_t>, std::vector<int>> Model::validateBatch(int lastN_, std::vector<std::vector<int32_t>> &inputIds_) {
+    // reset step (as if this is prefill), although there might be a non-zero pastSeqLen.
+    std::vector<SequenceMeta *> workingSeqs;
+    int nSamples = 0;
+    int idx = 0;
+    for (auto x : workingGroup) {
+        if (inputIds_.size() > 0) {
+            x->get(0)->setInputSeqLen(inputIds_[idx].size() + 1);
+            x->get(0)->rectGenTokens(0, inputIds_[idx]);
+        }
+        workingSeqs.push_back(x->get(0));
+        nSamples += x->get(0)->getInputSeqLen();
+        std::cout << "validate group " << x->getGroupID() << " input " << x->get(0)->getInputSeqLen() << std::endl;
+        idx++;
+    }
+
+    // computing logits of all tokens from inputs
+    std::tuple<float *, int, int> result = decoder->forward(workingSeqs, true);
+    std::cout << "valid forward" << std::endl;
+    float *outBuf = std::get<0>(result);
+    int sampleOffset = std::get<1>(result);
+    int sampleSize = std::get<2>(result);
+    std::cout << "valid sampleOffsetSize " << sampleOffset << " " << sampleSize << " " << nSamples << std::endl;
+
+    // Greedy search for all tokens
+    std::vector<int32_t> ret = greedySearch(outBuf, sampleOffset, sampleSize, nSamples);
+    assert(ret.size() == nSamples);
+    std::cout << "valid greedySearch size " << ret.size() << " "<< ret[0] << " " << ret[1] << " " << ret[2] << std::endl;
+
+    // Check stop status, not implemented for all logits
+    // stopCheck(result, workingGroup);
+
+    // validate each generated token whether equal to the next token in the inputs
+    int offset  = -1; // the last one is new generated token
+    std::vector<int> rejectedK(workingGroup.size(), 0);
+    std::vector<int32_t> rectTokens(workingGroup.size(), -1);
+    for (int i = 0; i < workingGroup.size(); i++) {
+        auto x = workingGroup[i];
+        std::cout << "validate step " << x->get(0)->getStep() << " input " << x->get(0)->getInputSeqLen()
+		<< " past " << x->get(0)->getPastSeqLen() << " inputToken " << x->get(0)->getInputTokens()[0] << " "
+        << x->get(0)->getInputTokens()[1] << " " << x->get(0)->getInputTokens()[2] << std::endl;
+        int ntokens = x->get(0)->getInputSeqLen();
+        offset += ntokens;
+        for (int j = lastN_; j > 0; j--) {
+            std::cout << "validj " << j << " " << x->get(0)->getInputTokens()[ntokens - j] << " " << offset << " " << ret[offset - j] << std::endl;
+            if (x->get(0)->getInputTokens()[ntokens - j] != ret[offset - j]) {
+                rectTokens[i] = ret[offset - j];
+                rejectedK[i] = j;
+                break;
+            }
+        }
+        std::cout << "valid " << i << " " << rejectedK[i] << " " << rectTokens[i] << std::endl;
+
+        // Step forward on all seqs, only add accepted tokens
+        x->get(0)->setPastSeqLen(x->get(0)->getPastSeqLen()
+                                                + x->get(0)->getInputSeqLen()
+                                                - rejectedK[i]);
+        for (int j = lastN_; j >= rejectedK[i]; j--) {
+            x->get(0)->addNextToken(ret[offset - j]);
+        }
+        x->get(0)->setStep(x->get(0)->getStep() + 1);
+    }
+
+    return std::tuple<std::vector<int32_t>, std::vector<int>>(rectTokens, rejectedK);
 }
 
 bool Model::isMaster() {
