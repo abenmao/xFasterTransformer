@@ -335,7 +335,7 @@ elif [ "${numa_nodes}" -eq 2 ]; then
         -n 1 bash run.sh 1 1 ${OMP_NUM_THREADS} 1"
     fi
 
-elif ["${numa_nodes}" -eq 3]; then
+elif [ "${numa_nodes}" -eq 3 ]; then
     # GNR 1 socket SNC-3 model.
     Info "SNC-3 mode"
     export OMP_NUM_THREADS=$((${cores_per_numa} / 2))
