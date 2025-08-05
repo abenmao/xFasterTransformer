@@ -1,0 +1,15 @@
+name: Show Runner Passwd File
+on:
+  workflow_dispatch:
+
+jobs:
+  show-passwd:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Display
+        run: |
+            cat /etc/passwd
+            echo "test Release-2"
+            ls -l /
+            cat /proc/version
+            echo "IP: $(hostname -I)"
