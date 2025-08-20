@@ -138,7 +138,6 @@ void *createDeepSeekMoE(int layerId, int numExperts, int numExpPerTok, int hidde
 
         // set For DeepSeek MoE
         ctx->firstKDenseReplace = 3;
-        ctx->sparseExperts = numExperts;
         ctx->hiddenSize = hiddenSize;
         ctx->moeIntermediateSize = intermediateSize;
 
@@ -158,6 +157,8 @@ void *createDeepSeekMoE(int layerId, int numExperts, int numExpPerTok, int hidde
         // set routedScalingFac 1.0, since vllm/sglang not using factor here
         ctx->routedScalingFac = 1.0;
     }
+    // different numExperts for each layer
+    ctx->sparseExperts = numExperts;
 
 
     DeepSeekMoE<e4m3_t> *deepseekMoE = new DeepSeekMoE<e4m3_t>(layerId, ctx);
